@@ -1,0 +1,16 @@
+{
+  "name": "bumble-swiper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local dashboard + ADB bot that swipes in the Bumble Android app (emulator or phone) based on profile keyword filters",
+  "scripts": {
+    "start": "node src/index.js",
+    "emulator": "scripts/emulator.sh",
+    "test": "node scripts/selftest.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "ws": "^8.18.0"
+  }
+}

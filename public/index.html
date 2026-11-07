@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bumble Swiper</title>
+<style>
+  :root { --bg:#111418; --panel:#1b2027; --line:#2b323c; --text:#e6e9ee; --muted:#8b94a3; --accent:#ffc629; --like:#3ddc84; --pass:#ff5c5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:2; }
+  header h1 { font-size:18px; margin:0; color:var(--accent); }
+  #status { color:var(--muted); flex:1; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:#666; margin-right:6px; }
+  .dot.on { background:var(--like); }
+  button { background:#2a323d; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 14px; cursor:pointer; font-size:14px; }
+  button:hover { background:#354050; }
+  button.primary { background:var(--accent); color:#111; border-color:transparent; font-weight:600; }
+  button.danger { background:var(--pass); color:#fff; border-color:transparent; }
+  button.like { background:var(--like); color:#111; border-color:transparent; }
+  button.small { padding:4px 9px; font-size:12px; }
+  button:disabled { opacity:.45; cursor:default; }
+  main { display:grid; grid-template-columns: 380px minmax(0,1fr) 340px; gap:16px; padding:16px 20px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
+  section h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); display:flex; align-items:center; gap:8px; }
+  section h2 .sp { flex:1; }
+  label { display:block; color:var(--muted); font-size:12px; margin:10px 0 4px; }
+  textarea, input, select { width:100%; background:#0f1317; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:14px; font-family:inherit; }
+  textarea { min-height:70px; resize:vertical; font-family:ui-monospace, Menlo, monospace; font-size:13px; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .row > * { flex:1; }
+  .check { display:flex; align-items:center; gap:8px; margin-top:10px; }
+  .check input { width:auto; }
+  .col { display:flex; flex-direction:column; gap:16px; min-width:0; }
+  .stats { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .stat { background:#0f1317; border-radius:8px; padding:10px; text-align:center; }
+  .stat b { display:block; font-size:22px; }
+  .stat span { color:var(--muted); font-size:12px; }
+  .name { font-size:20px; font-weight:600; }
+  .verdict { display:inline-block; padding:3px 10px; border-radius:999px; font-weight:600; font-size:12px; margin-left:8px; }
+  .verdict.like { background:var(--like); color:#111; } .verdict.pass { background:var(--pass); color:#fff; }
+  .pills { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  .pill { background:#2a323d; border-radius:999px; padding:3px 10px; font-size:12px; }
+  .pill.hit { background:var(--accent); color:#111; font-weight:600; }
+  pre { background:#0f1317; border:1px solid var(--line); border-radius:8px; padding:10px; overflow:auto; max-height:320px; font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0; }
+  #log { max-height:300px; }
+  .muted { color:var(--muted); }
+  .warn { background:#3a2f12; border:1px solid #6b5a1e; color:#ffd966; padding:8px 12px; border-radius:8px; font-size:13px; margin-bottom:10px; }
+  .note { background:#12283a; border:1px solid #1e4a6b; color:#9fd3ff; padding:8px 12px; border-radius:8px; font-size:13px; margin:10px 0; }
+  .err { background:#3a1212; border:1px solid #6b1e1e; color:#ff9f9f; }
+  /* phone */
+  #phone { position:relative; background:#000; border:6px solid #2a2f37; border-radius:26px; overflow:hidden; aspect-ratio: 1080 / 2400; outline:none; cursor:crosshair; user-select:none; -webkit-user-select:none; }
+  #phone:focus { border-color:var(--accent); }
+  #shot { width:100%; height:100%; display:block; object-fit:contain; pointer-events:none; }
+  #phoneMsg { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); text-align:center; padding:20px; }
+  .bar { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+  .bar button { flex:1; padding:6px 4px; font-size:12px; }
+  .step { display:flex; gap:10px; align-items:center; padding:6px 0; border-bottom:1px solid var(--line); }
+  .step:last-child { border-bottom:none; }
+  .step .ic { width:22px; text-align:center; }
+  @media (max-width:1200px) { main { grid-template-columns: 340px minmax(0,1fr); } .col.settings { grid-column: 1 / -1; } }
+  @media (max-width:800px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Bumble Swiper</h1>
+  <div id="status"><span class="dot" id="dot"></span><span id="statusText">connecting…</span></div>
+  <button id="startBtn" class="primary">Start swiping</button>
+  <button id="stopBtn" class="danger" disabled>Stop</button>
+</header>
+<main>
+  <div class="col">
+    <section>
+      <h2>Phone <span class="sp"></span><span id="fps" class="muted" style="font-weight:normal;text-transform:none"></span></h2>
+      <div id="phone" tabindex="0" title="Click to tap, drag to swipe, type when focused">
+        <img id="shot" alt="">
+        <div id="phoneMsg">Waiting for the emulator…</div>
+      </div>
+      <div class="bar">
+        <button data-key="BACK">◁ Back</button>
+        <button data-key="HOME">○ Home</button>
+        <button data-key="RECENTS">▢ Recents</button>
+        <button data-key="Enter">⏎ Enter</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="sendText" placeholder="Type text here and press Enter to send it to the phone">
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">Click = tap, drag = swipe, keys type into the focused field when the phone has focus. Paste works too.</div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section id="setupSec">
+      <h2>Setup <span class="sp"></span><span id="setupBusy" class="muted" style="font-weight:normal;text-transform:none"></span></h2>
+      <div class="step"><span class="ic" id="stDevice">○</span><span>Emulator running</span></div>
+      <div class="step"><span class="ic" id="stGoogle">○</span><span>Google account signed in <span id="googleAcct" class="muted"></span></span></div>
+      <div class="step"><span class="ic" id="stBumble">○</span><span>Bumble installed</span></div>
+      <div class="step"><span class="ic" id="stLogin">○</span><span>Logged in to Bumble (phone number + SMS code, done on the phone screen)</span></div>
+      <div id="setupMsg" class="note" hidden></div>
+      <div id="googleForm">
+        <label>Google email</label>
+        <input id="gEmail" type="email" autocomplete="username" placeholder="you@gmail.com">
+        <label>Google password</label>
+        <input id="gPass" type="password" autocomplete="current-password">
+        <div class="muted" style="font-size:12px;margin-top:6px">Used once to sign the emulator into the Play Store. Sent only to this app on your machine; never stored. If Google asks for 2-step verification, complete it on the phone screen and setup continues.</div>
+        <div class="row" style="margin-top:10px">
+          <button id="setupRun" class="primary">Sign in to Google &amp; install Bumble</button>
+        </div>
+      </div>
+      <div id="installOnly" hidden class="row" style="margin-top:10px">
+        <button id="setupInstall" class="primary">Install Bumble</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Today</h2>
+      <div class="stats">
+        <div class="stat"><b id="sSeen">0</b><span>seen</span></div>
+        <div class="stat"><b id="sLiked" style="color:var(--like)">0</b><span>liked</span></div>
+        <div class="stat"><b id="sPassed" style="color:var(--pass)">0</b><span>passed</span></div>
+        <div class="stat"><b id="sMatches" style="color:var(--accent)">0</b><span>matches</span></div>
+      </div>
+    </section>
+
+    <section id="profile">
+      <h2>Current profile</h2>
+      <div id="profileBody" class="muted">Nothing evaluated yet.</div>
+    </section>
+
+    <section>
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+    <section id="inspectSec" hidden>
+      <h2>Inspect</h2>
+      <pre id="inspect"></pre>
+    </section>
+  </div>
+
+  <div class="col settings">
+    <section>
+      <h2>Filter</h2>
+      <div id="dryWarn" class="warn">Dry run is ON: decisions are shown but nothing is swiped. Swipe on the phone to move to the next profile.</div>
+      <label>Like when the profile contains any of (one per line)</label>
+      <textarea id="terms"></textarea>
+      <label>…but not if it also contains (one per line)</label>
+      <textarea id="excludePhrases" style="min-height:55px"></textarea>
+      <label>Where to look</label>
+      <select id="matchIn">
+        <option value="anywhere">Badges, bio and prompts (anywhere on the card)</option>
+        <option value="pills">Badges / interest chips only</option>
+      </select>
+      <label>When a profile does not match</label>
+      <select id="onNoMatch">
+        <option value="pass">Swipe left (pass)</option>
+        <option value="wait">Leave it for me to decide</option>
+      </select>
+      <div class="check"><input type="checkbox" id="dryRun"><label for="dryRun" style="margin:0">Dry run (never swipe)</label></div>
+      <div class="check"><input type="checkbox" id="readProfileScroll"><label for="readProfileScroll" style="margin:0">Scroll through the whole profile before deciding</label></div>
+      <label>Delay before each swipe (ms, min / max)</label>
+      <div class="row"><input type="number" id="delayMin"><input type="number" id="delayMax"></div>
+      <label>Daily caps (likes / total swipes)</label>
+      <div class="row"><input type="number" id="dailyLikeCap"><input type="number" id="dailySwipeCap"></div>
+      <label>Swipe method</label>
+      <select id="swipeMethod">
+        <option value="click">Tap the like / pass buttons (falls back to swipe gesture)</option>
+        <option value="keyboard">Swipe gesture only</option>
+      </select>
+      <div style="margin-top:14px"><button id="saveBtn" class="primary" style="width:100%">Save settings</button></div>
+    </section>
+    <section>
+      <h2>Manual controls</h2>
+      <div class="row">
+        <button class="like" data-action="like">Like ➜</button>
+        <button data-action="pass">⇦ Pass</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button data-action="dismiss">Dismiss popup</button>
+        <button data-action="read">Read profile</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button data-action="encounters">Open Bumble</button>
+        <button data-action="reload">Restart Bumble</button>
+      </div>
+      <div style="margin-top:8px"><button id="inspectBtn" style="width:100%">Inspect screen (diagnostics)</button></div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const fields = ['matchIn','onNoMatch','swipeMethod','dailyLikeCap','dailySwipeCap'];
+let config = null, ws = null, lastState = null;
+
+// ---------- drafts ----------
+// Everything typed into a text field is saved to localStorage on every keystroke and restored here,
+// before the first paint, so a reload or a crash never loses it. Settings drafts are cleared only when
+// "Save settings" succeeds; the send-to-phone box when the text is sent; the Google email once the
+// account is signed in. The password field is deliberately not persisted.
+const DRAFT_PREFIX = 'bumble-swiper:dashboard:draft:';
+const SETTINGS_DRAFTS = ['terms','excludePhrases','delayMin','delayMax','dailyLikeCap','dailySwipeCap'];
+const ALL_DRAFTS = [...SETTINGS_DRAFTS, 'sendText', 'gEmail'];
+function draftGet(id) { try { return localStorage.getItem(DRAFT_PREFIX + id); } catch { return null; } }
+function draftSet(id, v) { try { localStorage.setItem(DRAFT_PREFIX + id, v); } catch { /* storage unavailable: nothing to do */ } }
+function draftClear(ids) { for (const id of ids) { try { localStorage.removeItem(DRAFT_PREFIX + id); } catch { /* ignore */ } } }
+function restoreDrafts(ids) { for (const id of ids) { const d = draftGet(id); if (d !== null) $(id).value = d; } }
+restoreDrafts(ALL_DRAFTS);
+for (const id of ALL_DRAFTS) $(id).addEventListener('input', () => draftSet(id, $(id).value));
+
+// ---------- settings ----------
+function renderConfig(c) {
+  config = c;
+  $('terms').value = c.terms.join('\n');
+  $('excludePhrases').value = c.excludePhrases.join('\n');
+  for (const f of fields) $(f).value = c[f];
+  $('dryRun').checked = c.dryRun;
+  $('readProfileScroll').checked = c.readProfileScroll;
+  $('delayMin').value = c.delayMs.min;
+  $('delayMax').value = c.delayMs.max;
+  $('dryWarn').hidden = !c.dryRun;
+  restoreDrafts(SETTINGS_DRAFTS); // unsaved edits win over the server's copy
+}
+function readConfig() {
+  const out = { terms: $('terms').value, excludePhrases: $('excludePhrases').value,
+    dryRun: $('dryRun').checked, readProfileScroll: $('readProfileScroll').checked,
+    delayMs: { min: +$('delayMin').value, max: +$('delayMax').value } };
+  for (const f of fields) out[f] = $(f).value;
+  return out;
+}
+
+// ---------- runner state ----------
+function renderState(s) {
+  lastState = s;
+  $('dot').className = 'dot' + (s.running ? ' on' : '');
+  let text = s.running ? s.status : 'automation stopped';
+  if (s.pausedUntil && s.pausedUntil > Date.now()) text += ' until ' + new Date(s.pausedUntil).toLocaleTimeString();
+  $('statusText').textContent = text;
+  $('startBtn').disabled = s.running;
+  $('stopBtn').disabled = !s.running;
+  $('sSeen').textContent = s.stats.seen; $('sLiked').textContent = s.stats.liked;
+  $('sPassed').textContent = s.stats.passed; $('sMatches').textContent = s.stats.matches;
+  const hasDevice = s.url && s.url !== 'no device';
+  $('stDevice').textContent = hasDevice ? '✅' : '⏳';
+  if (!hasDevice) $('phoneMsg').textContent = 'Waiting for the emulator to boot…';
+  if (s.current) renderProfile(s.current);
+}
+function esc(s) { return String(s ?? '').replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function renderProfile(p) {
+  const d = p.decision;
+  const hits = (d.matchedTerms || []).map((t) => t.toLowerCase().replace(/-/g,' '));
+  const isHit = (pill) => hits.some((t) => pill.toLowerCase().replace(/-/g,' ').includes(t));
+  const pills = (p.pills || []).map((t) => `<span class="pill${isHit(t) ? ' hit' : ''}">${esc(t)}</span>`).join('');
+  const actionLabel = { 'dry-run': 'dry run, not swiped', like: 'liked', pass: 'passed', wait: 'left for you' }[p.action] || p.action;
+  $('profileBody').className = '';
+  $('profileBody').innerHTML = `
+    <div><span class="name">${esc(p.name || '?')}${p.age ? ', ' + esc(p.age) : ''}</span>
+      <span class="verdict ${d.like ? 'like' : 'pass'}">${d.like ? 'LIKE' : 'PASS'}</span>
+      <span class="muted"> · ${esc(actionLabel)}</span></div>
+    <div class="muted" style="margin-top:4px">${esc(d.reason)}</div>
+    <div class="pills">${pills || '<span class="muted">no badges found</span>'}</div>
+    <details><summary class="muted">Card text</summary><pre>${esc(p.textPreview)}</pre></details>`;
+}
+function appendLog(line) {
+  const el = $('log');
+  el.textContent += (el.textContent ? '\n' : '') + line;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---------- setup ----------
+function renderSetup(st) {
+  $('stGoogle').textContent = st.googleAccount ? '✅' : (st.step === 'google' && st.busy ? '⏳' : '○');
+  $('googleAcct').textContent = st.googleAccount ? `(${st.googleAccount})` : '';
+  $('stBumble').textContent = st.bumbleInstalled ? '✅' : (st.step === 'install' && st.busy ? '⏳' : '○');
+  $('stLogin').textContent = st.bumbleInstalled ? '👉' : '○';
+  $('setupBusy').textContent = st.busy ? 'working…' : '';
+  const msg = $('setupMsg');
+  msg.hidden = !st.message;
+  msg.textContent = st.message || '';
+  msg.className = 'note' + (st.step === 'error' ? ' err' : '') + (st.needsAttention ? ' warn' : '');
+  $('googleForm').hidden = !!st.googleAccount;
+  if (st.googleAccount) draftClear(['gEmail']);
+  $('installOnly').hidden = !(st.googleAccount && !st.bumbleInstalled);
+  $('setupRun').disabled = st.busy;
+  $('setupInstall').disabled = st.busy;
+}
+$('setupRun').onclick = async () => {
+  const email = $('gEmail').value.trim(), password = $('gPass').value;
+  if (!email || !password) { alert('Enter your Google email and password first.'); return; }
+  const r = await api('POST', '/api/setup/run', { email, password });
+  if (r.error) alert(r.error);
+  $('gPass').value = '';
+};
+$('setupInstall').onclick = () => api('POST', '/api/setup/install');
+
+// ---------- phone (live screen + input) ----------
+const phone = $('phone'), shot = $('shot');
+let prevUrl = null, frames = 0, fpsT0 = Date.now();
+function showFrame(blob) {
+  const url = URL.createObjectURL(blob);
+  shot.onload = () => { if (prevUrl) URL.revokeObjectURL(prevUrl); prevUrl = url; };
+  shot.src = url;
+  $('phoneMsg').style.display = 'none';
+  frames++;
+  if (Date.now() - fpsT0 > 2000) { $('fps').textContent = (frames / ((Date.now() - fpsT0) / 1000)).toFixed(1) + ' fps'; frames = 0; fpsT0 = Date.now(); }
+}
+function send(msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+function norm(ev) {
+  const r = shot.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height };
+}
+let down = null;
+phone.addEventListener('pointerdown', (ev) => { phone.focus(); down = { ...norm(ev), t: Date.now(), cx: ev.clientX, cy: ev.clientY }; phone.setPointerCapture(ev.pointerId); ev.preventDefault(); });
+phone.addEventListener('pointerup', (ev) => {
+  if (!down) return;
+  const up = norm(ev), dt = Date.now() - down.t;
+  const dist = Math.hypot(ev.clientX - down.cx, ev.clientY - down.cy);
+  if (dist < 8 && dt < 500) send({ type: 'tap', x: up.x, y: up.y });
+  else send({ type: 'swipe', x1: down.x, y1: down.y, x2: up.x, y2: up.y, ms: Math.max(80, Math.min(1500, dt)) });
+  down = null;
+});
+let textBuf = '', textTimer = null;
+function flushText() { if (textBuf) { send({ type: 'text', text: textBuf }); textBuf = ''; } textTimer = null; }
+const SPECIAL = new Set(['Enter','Backspace','Delete','Tab','Escape','ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Home','End']);
+phone.addEventListener('keydown', (ev) => {
+  if (ev.metaKey || ev.ctrlKey) return; // let copy/paste through
+  if (SPECIAL.has(ev.key)) { flushText(); send({ type: 'key', key: ev.key }); ev.preventDefault(); return; }
+  if (ev.key.length === 1) { textBuf += ev.key; clearTimeout(textTimer); textTimer = setTimeout(flushText, 150); ev.preventDefault(); }
+});
+phone.addEventListener('paste', (ev) => { const t = ev.clipboardData.getData('text'); if (t) send({ type: 'text', text: t }); ev.preventDefault(); });
+for (const b of document.querySelectorAll('[data-key]')) b.onclick = () => send({ type: 'key', key: b.dataset.key });
+$('sendText').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { send({ type: 'text', text: $('sendText').value }); $('sendText').value = ''; draftClear(['sendText']); } });
+
+// ---------- wiring ----------
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  return r.json();
+}
+$('startBtn').onclick = () => api('POST', '/api/start');
+$('stopBtn').onclick = () => api('POST', '/api/stop');
+$('saveBtn').onclick = async () => {
+  const r = await api('PUT', '/api/config', readConfig());
+  if (r.error) { alert(r.error); return; } // failed save keeps the draft
+  draftClear(SETTINGS_DRAFTS);
+  renderConfig(r);
+};
+$('dryRun').onchange = () => { $('dryWarn').hidden = !$('dryRun').checked; };
+for (const b of document.querySelectorAll('[data-action]')) b.onclick = () => api('POST', '/api/action', { action: b.dataset.action });
+$('inspectBtn').onclick = async () => {
+  $('inspectSec').hidden = false;
+  $('inspect').textContent = 'Inspecting…';
+  $('inspect').textContent = JSON.stringify(await api('GET', '/api/inspect'), null, 2);
+};
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.binaryType = 'blob';
+  ws.onopen = () => send({ type: 'screen', on: !document.hidden });
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof Blob) { showFrame(ev.data); return; }
+    const m = JSON.parse(ev.data);
+    if (m.type === 'snapshot') { renderConfig(m.config); renderState(m); renderSetup(m.setup); $('log').textContent = ''; m.log.forEach(appendLog); }
+    else if (m.type === 'state') renderState(m.state);
+    else if (m.type === 'profile') renderProfile(m.profile);
+    else if (m.type === 'log') appendLog(m.line);
+    else if (m.type === 'config') renderConfig(m.config);
+    else if (m.type === 'setup') renderSetup(m.setup);
+  };
+  ws.onclose = () => { $('statusText').textContent = 'disconnected, retrying…'; $('dot').className = 'dot'; setTimeout(connect, 2000); };
+}
+document.addEventListener('visibilitychange', () => send({ type: 'screen', on: !document.hidden }));
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# dependencies / build output
+node_modules/
+dist/
+out/
+build/
+.venv/
+__pycache__/
+
+# personal config with real values (committed twin: config.example.json)
+config.json
+
+# runtime state, logs, emulator/Chrome profiles, screenshots (all under data/)
+data/
+*.log
+*.jsonl
+stats.json
+
+# large data and media
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.mov
+*.wav
+*.mp3
+*.csv
+*.xlsx
+*.zip
+*.apk
+
+# OS / editor
+.DS_Store
