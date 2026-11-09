@@ -1,4 +1,4 @@
-# dependencies / build output
+# dependencies and build output
 node_modules/
 dist/
 out/
@@ -6,27 +6,14 @@ build/
 .venv/
 __pycache__/
 
-# personal config with real values (committed twin: config.example.json)
-config.json
+# secrets (.env.example is the committed template)
+.env
+.env.*
+!.env.example
 
-# runtime state, logs, emulator/Chrome profiles, screenshots (all under data/)
+# runtime state: settings, decisions, screenshots, photos, logs (large and personal)
 data/
 *.log
-*.jsonl
-stats.json
 
-# large data and media
-*.png
-*.jpg
-*.jpeg
-*.mp4
-*.mov
-*.wav
-*.mp3
-*.csv
-*.xlsx
-*.zip
-*.apk
-
-# OS / editor
+# OS and editor noise
 .DS_Store
