@@ -21,6 +21,8 @@ Set `BUMBLE_DATA_DIR` to run against a different data folder (handy for testing)
 
 All calls go through `src/llm.ts` (`structuredCall`), on whichever backend Settings selects: the Claude API with the key in `.env`, or the Claude Agent SDK (Claude Code as a library, every built-in tool off) using this machine's Claude Code sign-in. Each call follows the agent-coding LLM standard: the system prompt starts with `../shared/llm-system-prompt-preamble.md` word for word (read at call time), the `contact_eli` tool from `../shared/contact_eli_tool.json` is offered (on the Agent SDK path it is served as an in-process MCP tool, `mcp__eli__contact_eli`), and every response is piped to `python3 ../shared/llm_contact.py check`. If the model called the tool or wrote an `@ELI:` line, the call throws `ContactedEliError`: the profile is recorded as skipped with that message, the batch ends with status **error**, and no next batch is scheduled. Nothing is retried; Eli reads and answers with `llm-inbox`, then presses Start again.
 
+Confirm step (API backend only, added 2026-11-10 because Haiku used the tool for routine remarks about the task): when a response contains a `contact_eli` tool call, nothing is sent yet. `confirmThenCheck` in `src/llm.ts` gets one forced-choice question from `llm_contact.py confirm` and puts it to the same model with the same system prompt (no JSON schema, no thinking). If it answers "send to Eli and stop", gives no clear answer, or anything in this step fails, the original message goes through `check` unchanged. Only an explicit "it was a task remark, keep working" continues: the model is asked for its answer in the normal format, that answer is checked and used, and what it first said is appended to `LLMInbox/unconfirmed.jsonl` by `llm_contact.py unconfirmed` (kept, not notified). An `@ELI:` line is never questioned. The Agent SDK backend has no confirm step: every `contact_eli` call there is sent as before.
+
 ### Safety rails
 
 Every tap and swipe the driver makes is gated on Bumble being the foreground app. Screens that look like your own profile, settings, or a Premium / Boost / coins purchase sheet are recognised as off-limits and only ever left with the Back key. Popup dismissal matches an explicit allowlist of "decline" labels (Not now, Maybe later, No thanks, Keep swiping…), never generic ones like Continue or OK. Like and Pass are tapped by their button, found by label in the lower half of the screen; if no button is found the card is swiped (on Bumble a horizontal swipe is the vote). A vote that doesn't advance the card is never retried blindly: the loop re-reads the screen and judges whatever is there. What you do by hand on the phone panel is not gated.
@@ -55,7 +57,7 @@ The intellectual exception is a separate, rare, high bar (top 1–2%): someone w
 | `src/bumble.ts` | `BumbleDriver`: screen recognition (`SELECTORS`), profile reading, voting by button or gesture, SuperSwipe with fallback, popup dismissal, image saving. |
 | `src/classifier.ts` | The single judging call: builds the system prompt, sends text + screens, parses the answer, computes the arithmetic posterior, decides like / SuperSwipe / pass. |
 | `src/prompt.ts` | The Bayesian classifier prompt with the intellectual exception, and the feedback block (your guidance, graded examples, reference cases). |
-| `src/llm.ts` | `structuredCall`: one structured Claude call on the API or Agent SDK backend, plus the shared preamble, `contact_eli` tool and inbox check. |
+| `src/llm.ts` | `structuredCall`: one structured Claude call on the API or Agent SDK backend, plus the shared preamble, `contact_eli` tool, confirm step and inbox check. |
 | `src/android.ts` | Thin ADB client: shell, UI dumps, taps, swipes, screenshots, text input. |
 | `src/emulator.ts` | Finds, boots and stops the `bumble` AVD headlessly. |
 | `src/screen.ts` | `ScreenStream`: streams the phone screen over the WebSocket and relays taps, drags and keys. |
@@ -64,7 +66,7 @@ The intellectual exception is a separate, rare, high bar (top 1–2%): someone w
 | `src/store.ts` | `data/decisions.jsonl` read/write, verdicts, notes, stats, feedback examples. |
 | `src/config.ts` | `Settings` schema (zod) and `data/settings.json` load/update. |
 | `src/paths.ts` | `DATA_DIR` (or `$BUMBLE_DATA_DIR`), photos, errors, settings and decisions paths. |
-| `src/test-llm.ts` | `npm test`: scores one fake profile end to end without the phone; `--dry-run` checks the wiring for free. |
+| `src/test-llm.ts` | `npm test`: scores one fake profile end to end without the phone; `--dry-run` checks the wiring and the confirm step for free. |
 | `public/index.html`, `public/app.js`, `public/style.css` | The dashboard: Live tab (settings, on-screen card, recent, phone panel, setup) and Review tab (filters, grading, notes). |
 | `scripts/emulator.sh` | One-time creation of the `bumble` AVD (Pixel 8, Android 15 with Play Store). |
 | `scripts/install-app.sh`, `app/` | Build and install **Bumble Swiper.app**, a Dock launcher (`launcher.sh`, `Info.plist`, icon). |
@@ -81,7 +83,7 @@ Why these dependencies: `express`/`ws` for the dashboard and phone stream, `shar
 - State: `data/decisions.jsonl` (every profile and decision), `data/photos/<id>/` (screens and crops), `data/errors/` (screenshots on failure). `BUMBLE_DATA_DIR` replaces `data/` wholesale. The whole `data/` folder is gitignored (personal).
 - Logs: the dashboard's Live tab (also `GET /api/state` → `log`); `data/server.log` when started from the Dock launcher, stdout under `npm run dev`.
 - Android: the `bumble` AVD under `~/.android/avd/`; platform tools and command-line tools from Homebrew; the SDK at `~/Library/Android/sdk`.
-- LLM inbox (shared): `~/Library/Application Support/LLMInbox/messages.jsonl`, read with `llm-inbox`.
+- LLM inbox (shared): `~/Library/Application Support/LLMInbox/messages.jsonl`, read with `llm-inbox`; tool calls the model chose not to send are in `unconfirmed.jsonl` beside it.
 
 ## Common tasks
 
@@ -102,7 +104,7 @@ npm run dev                                   # dashboard at http://localhost:49
 npm start                                     # same, no reload (what the Dock launcher runs)
 NO_OPEN=1 npm start                           # don't open the browser
 npm run typecheck                             # tsc --noEmit
-npm test -- --dry-run                         # free: preamble, contact_eli tool and llm_contact.py hook all wired
+npm test -- --dry-run                         # free: preamble, contact_eli tool and llm_contact.py hook all wired; confirm step on stubbed replies (temp inbox)
 npm test                                      # one fake vegan profile through the classifier with the current settings; no phone needed
 npm test -- --backend api --model claude-haiku-5-5   # cheapest end-to-end check of the API path
 npm test -- --contact                         # asks the model to call contact_eli; a test message lands in `llm-inbox list`
@@ -162,6 +164,10 @@ Outside the app:
 - `uiautomator dump` can hang on an emulator that is busy; the client retries three times and then falls back to dumping to a file.
 - Profiles the model declines to evaluate are recorded as "skipped" and passed in auto mode, since you only want likes on qualifying profiles.
 - Under structured output the response is one JSON block, so the preamble's `@ELI:` line marker cannot appear; the `contact_eli` tool is the live channel. `llm_contact.py` still scans text blocks.
+- The confirm step exists only on the API backend. The Agent SDK harness answers the `contact_eli` call itself inside its own loop and offers neither a forced tool choice nor a way to replay the exchange with a different tool result, so the shared protocol cannot be run there; on that backend a routine remark made through the tool still stops the task and reaches Eli.
+- The confirm question must be asked without the JSON output format and without thinking (a forced tool choice cannot be combined with thinking), so `viaApi` makes that one call with `messages.create`, not `messages.parse`. It costs one short extra call, and one more full call if the model keeps working, only when the tool was called; the usage reported for that profile is the follow-up call's alone.
+- Read `~/Library/Application Support/LLMInbox/unconfirmed.jsonl` now and then: it holds what models said in tool calls they then called task remarks, and is the audit that the confirm step is not swallowing real messages.
+- Tests that run `llm_contact.py` must set `LLM_INBOX_DIR` to a temp folder (records land there, nothing is notified). `--dry-run` does this itself; for `--contact`, which otherwise sends Eli a real test message, prefix the command with `LLM_INBOX_DIR=$(mktemp -d)`. With the confirm step, `--contact` on the API backend may also end with the model choosing not to send.
 - On the Agent SDK path the harness prefixes MCP tool names (`mcp__eli__contact_eli`); `src/llm.ts` renames the block back to `contact_eli` before the inbox check.
 - `loadSettings()` drops only the invalid keys when `data/settings.json` fails the schema (the Tinder swiper reset everything in that case). Widen the schema in `src/config.ts` and the matching `max` in `public/index.html` together.
 - Haiku 4.5 predates adaptive thinking and the effort parameter; `src/llm.ts` leaves both out for it.

@@ -5,7 +5,8 @@
  * contact_eli tool are wired in, and the structured output parses.
  *
  *   npm test                               # one fake profile, current settings (one model call)
- *   npm test -- --dry-run                  # free: checks the preamble, the tool and the inbox hook
+ *   npm test -- --dry-run                  # free: checks the preamble, the tool and the inbox hook, and
+ *                                          # runs the confirm step on stubbed replies (temp inbox)
  *   npm test -- --model claude-haiku-5-5 --backend api
  *   npm test -- --contact                  # asks the model to call contact_eli: a test message
  *                                          # lands in Eli's LLM inbox (llm-inbox list)
@@ -14,12 +15,13 @@
  */
 import "dotenv/config";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { classifyProfile, decide, buildSystem } from "./classifier.js";
 import { loadSettings, type Settings } from "./config.js";
-import { ContactedEliError, backendLabel, structuredCall } from "./llm.js";
+import { ContactedEliError, backendLabel, confirmThenCheck, structuredCall } from "./llm.js";
 import { ROOT } from "./paths.js";
 
 const FAKE_PROFILE = `Maya, 31
@@ -64,6 +66,67 @@ function dryRun(settings: Settings): void {
   console.log(`Backend would be ${backendLabel(settings)} with ${settings.model} (${settings.effort}).`);
 }
 
+/**
+ * The confirm step on stubbed model replies: no API call. LLM_INBOX_DIR points llm_contact.py at a
+ * throwaway inbox for the duration, so records land there and Eli is not notified.
+ */
+async function confirmStepOffline(): Promise<void> {
+  const inbox = fs.mkdtempSync(path.join(os.tmpdir(), "bumble-swiper-inbox-"));
+  const before = process.env.LLM_INBOX_DIR;
+  process.env.LLM_INBOX_DIR = inbox;
+  const lines = (f: string): { message?: string }[] => {
+    const file = path.join(inbox, f);
+    return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+  };
+  const fail = (m: string): never => { throw new Error(`confirm step: ${m}`); };
+  try {
+    const tools = [JSON.parse(fs.readFileSync(path.join(path.resolve(ROOT, "..", "shared"), "contact_eli_tool.json"), "utf8"))];
+    const messages = [{ role: "user" as const, content: "PROFILE TEXT: stub" }];
+    const plain = { role: "assistant", content: [{ type: "text", text: '{"probability":0.1}' }] };
+    const called = { role: "assistant", content: [{ type: "tool_use", id: "toolu_test1", name: "contact_eli", input: { message: "This profile has no bio." } }] };
+    const choose = (meant: string) => ({ role: "assistant", content: [{ type: "tool_use", id: "toolu_test2", name: "contact_eli_decision", input: { meant } }] });
+    let decides = 0, agains = 0;
+    /** Returns the response the app would use, or "sent" when the call stopped with ContactedEliError. */
+    const run = (response: unknown, decide: () => unknown) =>
+      confirmThenCheck<unknown>(
+        { model: "stub-model", system: "stub system", messages, response, tools },
+        async (m, d) => {
+          decides++;
+          if (m.length !== 3 || m[2].role !== "user") fail("the question call did not get messages + ask");
+          if (d.tool_choice.type !== "tool" || d.tool_choice.name !== "contact_eli_decision" || d.tools.length !== 2 || !d.max_tokens) fail("the question call did not get the forced decision tool");
+          return decide();
+        },
+        async (m) => {
+          agains++;
+          if (m.length !== 3 || !JSON.stringify(m[2]).includes("tool_result")) fail("the follow-up call did not get messages + keep");
+          return plain;
+        },
+      ).catch((e) => (e instanceof ContactedEliError ? "sent" : Promise.reject(e)));
+
+    if ((await run(plain, () => fail("asked about a response with no tool call"))) !== plain || decides || agains || lines("messages.jsonl").length) fail("a response with no tool call was not left alone");
+    console.log("OK: confirm step, no tool call: untouched.");
+
+    if ((await run(called, () => choose("task_remark_keep_working"))) !== plain || decides !== 1 || agains !== 1) fail("keep working did not continue with the follow-up answer");
+    if (lines("messages.jsonl").length) fail("keep working still sent the message");
+    if (lines("unconfirmed.jsonl").length !== 1 || lines("unconfirmed.jsonl")[0].message !== "This profile has no bio.") fail("the unconfirmed message was not kept");
+    console.log("OK: confirm step, keep working: follow-up answer used, first message kept in unconfirmed.jsonl.");
+
+    if ((await run(called, () => choose("send_to_eli_and_stop"))) !== "sent" || agains !== 1 || lines("messages.jsonl").length !== 1 || lines("messages.jsonl")[0].message !== "This profile has no bio.") fail("send did not record the original message");
+    console.log("OK: confirm step, send: recorded by check.");
+
+    if ((await run(called, () => { throw new Error("stubbed API failure"); })) !== "sent" || agains !== 1 || lines("messages.jsonl").length !== 2) fail("a failing question call lost the message");
+    if ((await run(called, () => ({ content: [{ type: "text", text: "not a choice" }] }))) !== "sent" || lines("messages.jsonl").length !== 3) fail("an unclear answer lost the message");
+    console.log("OK: confirm step, question call throwing or unclear: original sent.");
+
+    decides = 0;
+    if ((await run({ role: "assistant", content: [{ type: "text", text: "@ELI: I would like to stop." }] }, () => fail("asked about an @ELI: line"))) !== "sent" || decides || lines("messages.jsonl").length !== 4 || lines("unconfirmed.jsonl").length !== 1) fail("an @ELI: line was not sent straight away");
+    console.log(`OK: confirm step, @ELI: line: sent without a question (test inbox ${inbox}).`);
+  } finally {
+    if (before === undefined) delete process.env.LLM_INBOX_DIR;
+    else process.env.LLM_INBOX_DIR = before;
+  }
+}
+
 async function main(): Promise<void> {
   const base = loadSettings();
   const settings: Settings = {
@@ -73,6 +136,7 @@ async function main(): Promise<void> {
   };
   if (process.argv.includes("--dry-run")) {
     dryRun(settings);
+    await confirmStepOffline();
     return;
   }
   console.log(`Backend: ${backendLabel(settings)} · model ${settings.model} (${settings.effort})`);

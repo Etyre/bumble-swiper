@@ -15,6 +15,8 @@
  * system prompt starts with shared/llm-system-prompt-preamble.md verbatim, the `contact_eli`
  * tool is offered, and each response is piped through shared/llm_contact.py. If the model
  * contacted Eli the call throws ContactedEliError and the caller stops its task (no retry).
+ * On the API path a contact_eli tool call is first questioned once (the confirm step, see
+ * confirmThenCheck); the Agent SDK path cannot ask that question and sends every call as before.
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -57,29 +59,92 @@ function withPreamble(system: string[]): string[] {
   return [preamble(), ...system];
 }
 
-/**
- * Pipe the exchange to `llm_contact.py check`. Exit 3 means the model called contact_eli or wrote
- * an `@ELI:` line: it has been recorded and Eli notified, so we throw and the caller stops.
- * Any other failure of the checker itself is logged and ignored: it must never block a call.
- */
-async function checkContact(payload: { model: string; system: string; messages: unknown; response: unknown; tools: unknown }): Promise<void> {
-  const input = JSON.stringify({ app: APP_NAME, ...payload });
-  const result = await new Promise<{ code: number | null; stdout: string; stderr: string; error?: Error }>((resolve) => {
-    const child = spawn("python3", ["-I", LLM_CONTACT_SCRIPT, "check"], { stdio: ["pipe", "pipe", "pipe"] });
+/** Run one `llm_contact.py` command with a JSON payload on stdin. */
+function runContactScript(cmd: string, payload: unknown): Promise<{ code: number | null; stdout: string; stderr: string; error?: Error }> {
+  return new Promise((resolve) => {
+    const child = spawn("python3", ["-I", LLM_CONTACT_SCRIPT, cmd], { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "", stderr = "";
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (error) => resolve({ code: null, stdout, stderr, error }));
     child.on("close", (code) => resolve({ code, stdout, stderr }));
     child.stdin.on("error", () => null);
-    child.stdin.end(input);
+    child.stdin.end(JSON.stringify(payload));
   });
+}
+
+interface Exchange<R> { model: string; system: string; messages: Anthropic.MessageParam[]; response: R; tools: unknown }
+
+/**
+ * Pipe the exchange to `llm_contact.py check`. Exit 3 means the model called contact_eli or wrote
+ * an `@ELI:` line: it has been recorded and Eli notified, so we throw and the caller stops.
+ * Any other failure of the checker itself is logged and ignored: it must never block a call.
+ */
+async function checkContact(payload: Exchange<unknown>): Promise<void> {
+  const result = await runContactScript("check", { app: APP_NAME, ...payload });
   if (result.error) {
     console.error(`[llm] contact check could not run: ${result.error.message}`);
     return;
   }
   if (result.code === 3) throw new ContactedEliError(result.stdout.trim());
   if (result.code !== 0) console.error(`[llm] contact check exited ${result.code}: ${result.stderr.trim().slice(0, 500)}`);
+}
+
+/** Request arguments for the confirm question, as `llm_contact.py confirm` hands them over. */
+export interface Decision {
+  tools: Anthropic.Tool[];
+  tool_choice: Anthropic.ToolChoice;
+  max_tokens: number;
+}
+
+/**
+ * The confirm step, then the contact check (shared/README.md, "Confirm step in any other language").
+ * Small models call contact_eli for routine remarks about the task, so a contact_eli call is first
+ * answered with one forced-choice question: send it to Eli and stop, or it was a task remark and keep
+ * working. `decide` makes that question call (same model and system prompt, the given messages, the
+ * Decision arguments, no JSON output format, no thinking); `again` repeats the normal call on a longer
+ * message list. Returns the response to use; throws ContactedEliError if a message was sent.
+ *
+ * Sending is the default. Only an explicit "keep working" choice continues the task; any error, odd
+ * shape or other answer here runs the check on the original response with the original messages, so
+ * a broken confirm step never loses a message.
+ */
+export async function confirmThenCheck<R>(
+  p: Exchange<R>,
+  decide: (messages: Anthropic.MessageParam[], decision: Decision) => Promise<unknown>,
+  again: (messages: Anthropic.MessageParam[]) => Promise<R>,
+): Promise<R> {
+  let kept: { messages: Anthropic.MessageParam[]; response: R } | null = null;
+  try {
+    // Prints null unless the response calls contact_eli (an @ELI: line is deliberate and never questioned).
+    const r = await runContactScript("confirm", { response: p.response, tools: p.tools });
+    if (r.error || r.code !== 0) throw new Error(r.error?.message ?? `confirm exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`);
+    const plan = JSON.parse(r.stdout) as {
+      ask: Anthropic.MessageParam[]; keep: Anthropic.MessageParam[]; decision: Decision; decision_tool_name: string; keep_value: string;
+    } | null;
+    if (plan) {
+      if (!Array.isArray(plan.ask) || !Array.isArray(plan.keep) || !plan.decision_tool_name || !plan.keep_value) throw new Error("unexpected confirm plan");
+      const { tools, tool_choice, max_tokens } = plan.decision;
+      const reply = (await decide([...p.messages, ...plan.ask], { tools, tool_choice, max_tokens })) as { content?: { type?: string; name?: string; input?: { meant?: unknown } }[] };
+      const choice = reply?.content?.find((b) => b?.type === "tool_use" && b.name === plan.decision_tool_name);
+      if (choice?.input?.meant === plan.keep_value) {
+        const messages = [...p.messages, ...plan.keep];
+        kept = { messages, response: await again(messages) };
+      }
+    }
+  } catch (e) {
+    console.error(`[llm] confirm step failed, sending the original message: ${(e as Error).message}`);
+    kept = null;
+  }
+  if (!kept) {
+    await checkContact(p);
+    return p.response;
+  }
+  await checkContact({ ...p, ...kept });
+  // Not sent, but not discarded either: what the model said goes to unconfirmed.jsonl for Eli to audit.
+  const u = await runContactScript("unconfirmed", { app: APP_NAME, model: p.model, response: p.response });
+  if (u.error || u.code !== 0) console.error(`[llm] could not note the unconfirmed message: ${u.error?.message ?? u.stderr.trim().slice(0, 300)}`);
+  return kept.response;
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -133,19 +198,27 @@ async function viaApi<S extends z.ZodType>(req: StructuredRequest<S>): Promise<S
   const system: Anthropic.TextBlockParam[] = blocks.map((text, i) => (i === 1 ? { type: "text", text, cache_control: { type: "ephemeral" } } : { type: "text", text }));
   const tools = [contactTool()];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: req.content }];
-  const response = await apiClient.messages.parse({
-    model: req.model,
-    max_tokens: req.maxTokens,
-    ...(effort ? { thinking: { type: "adaptive" as const } } : {}),
-    output_config: {
-      ...(effort ? { effort: req.effort } : {}),
-      format: zodOutputFormat(req.schema),
-    },
-    system,
-    tools,
-    messages,
-  });
-  await checkContact({ model: req.model, system: blocks.join("\n\n"), messages, response, tools });
+  const client = apiClient;
+  const call = (m: Anthropic.MessageParam[]) =>
+    client.messages.parse({
+      model: req.model,
+      max_tokens: req.maxTokens,
+      ...(effort ? { thinking: { type: "adaptive" as const } } : {}),
+      output_config: {
+        ...(effort ? { effort: req.effort } : {}),
+        format: zodOutputFormat(req.schema),
+      },
+      system,
+      tools,
+      messages: m,
+    });
+  // A contact_eli call is questioned once before it is sent. That question carries no JSON format and no
+  // thinking, or the forced choice is rejected. If the model keeps working, `response` is its new answer.
+  const response = await confirmThenCheck(
+    { model: req.model, system: blocks.join("\n\n"), messages, response: await call(messages), tools },
+    (m, decision) => client.messages.create({ model: req.model, system, messages: m, ...decision }, { timeout: 120_000 }),
+    call,
+  );
   const usage = {
     input: response.usage.input_tokens + (response.usage.cache_creation_input_tokens ?? 0),
     output: response.usage.output_tokens,
@@ -218,6 +291,8 @@ async function viaAgentSdk<S extends z.ZodType>(req: StructuredRequest<S>, setti
   } finally {
     clearTimeout(timer);
   }
+  // No confirm step here: the harness has already answered the tool call itself and offers no way to force
+  // a tool choice or to replay the exchange, so a contact_eli call on this path is sent as it is.
   // The harness names MCP tools mcp__<server>__<tool>; the checker looks for the bare name.
   const normalised = assistantBlocks.map((b) => {
     const blk = b as { type?: string; name?: string };
