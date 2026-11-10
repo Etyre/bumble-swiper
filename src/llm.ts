@@ -117,7 +117,7 @@ export async function confirmThenCheck<R>(
   let kept: { messages: Anthropic.MessageParam[]; response: R } | null = null;
   try {
     // Prints null unless the response calls contact_eli (an @ELI: line is deliberate and never questioned).
-    const r = await runContactScript("confirm", { response: p.response, tools: p.tools });
+    const r = await runContactScript("confirm", { model: p.model, response: p.response, tools: p.tools });
     if (r.error || r.code !== 0) throw new Error(r.error?.message ?? `confirm exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`);
     const plan = JSON.parse(r.stdout) as {
       ask: Anthropic.MessageParam[]; keep: Anthropic.MessageParam[]; decision: Decision; decision_tool_name: string; keep_value: string;

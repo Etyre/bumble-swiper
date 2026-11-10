@@ -87,9 +87,10 @@ async function confirmStepOffline(): Promise<void> {
     const choose = (meant: string) => ({ role: "assistant", content: [{ type: "tool_use", id: "toolu_test2", name: "contact_eli_decision", input: { meant } }] });
     let decides = 0, agains = 0;
     /** Returns the response the app would use, or "sent" when the call stopped with ContactedEliError. */
-    const run = (response: unknown, decide: () => unknown) =>
+    // The shared code asks the question only for validated models (llm_contact.CONFIRM_MODELS).
+    const run = (response: unknown, decide: () => unknown, model = "claude-haiku-4-5") =>
       confirmThenCheck<unknown>(
-        { model: "stub-model", system: "stub system", messages, response, tools },
+        { model, system: "stub system", messages, response, tools },
         async (m, d) => {
           decides++;
           if (m.length !== 3 || m[2].role !== "user") fail("the question call did not get messages + ask");
@@ -120,6 +121,8 @@ async function confirmStepOffline(): Promise<void> {
 
     decides = 0;
     if ((await run({ role: "assistant", content: [{ type: "text", text: "@ELI: I would like to stop." }] }, () => fail("asked about an @ELI: line"))) !== "sent" || decides || lines("messages.jsonl").length !== 4 || lines("unconfirmed.jsonl").length !== 1) fail("an @ELI: line was not sent straight away");
+    if ((await run(called, () => fail("asked a model the confirm step is not validated for"), "claude-opus-5")) !== "sent" || decides || lines("messages.jsonl").length !== 5) fail("a non-validated model's contact_eli call was not sent straight away");
+    console.log("OK: confirm step, non-validated model (claude-opus-5): sent without a question.");
     console.log(`OK: confirm step, @ELI: line: sent without a question (test inbox ${inbox}).`);
   } finally {
     if (before === undefined) delete process.env.LLM_INBOX_DIR;
