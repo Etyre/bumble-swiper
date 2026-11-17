@@ -141,7 +141,7 @@ Dashboard sidebar, stored in `data/settings.json`:
 | Max screens sent to model | 6 | Evenly spaced screenshots of the profile; ~1k tokens each |
 | Max scrolls per profile | 12 | How far down a profile it reads |
 | Written reasoning | off | On adds a reasoning paragraph to each card at the cost of a couple of seconds per profile |
-| Model / effort | claude-opus-5-5 / medium | Opus 5.5, Sonnet 5.5, Haiku 5.5, Opus 5, Sonnet 5, Haiku 4.5, Opus 4.8, Fable 5.1 |
+| Model / effort | claude-opus-5-5 / medium | Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.2, Opus 5, Sonnet 5, Haiku 4.5, Opus 4.8, Fable 5.1 |
 | Backend | api | **Claude API**: the Anthropic SDK with the key in `.env`. **Claude Agent SDK**: Claude Code as a library, run as a subprocess with every tool switched off; by default without the API key so it uses this machine's Claude Code sign-in |
 | Device | bumble | AVD name, emulator window on/off, stop on exit, a specific adb serial, and the city the emulator's GPS points at |
 

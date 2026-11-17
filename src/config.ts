@@ -5,7 +5,7 @@ import { SETTINGS_FILE } from "./paths.js";
 /** The intellectual exception is raised when the model's probability reaches this. Fixed, not a slider. */
 export const EXCEPTION_THRESHOLD = 0.6;
 
-export const ModelSchema = z.enum(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-4-8", "claude-haiku-4-5"]);
+export const ModelSchema = z.enum(["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-2", "claude-fable-5-1", "claude-opus-4-8", "claude-haiku-4-5"]);
 
 export const SettingsSchema = z.object({
   /** "review": classify, show the recommendation, wait for you to swipe from the dashboard.
