@@ -13,10 +13,13 @@
  *
  * Every call also keeps the agent-coding LLM standard (~/Documents/agent-coding/CLAUDE.md): the
  * system prompt starts with shared/llm-system-prompt-preamble.md verbatim, the `contact_eli`
- * tool is offered, and each response is piped through shared/llm_contact.py. If the model
- * contacted Eli the call throws ContactedEliError and the caller stops its task (no retry).
+ * and `note_to_eli` tools are offered, and each response is piped through shared/llm_contact.py.
+ * If the model contacted Eli the call throws ContactedEliError and the caller stops its task (no retry).
  * On the API path a contact_eli tool call is first questioned once (the confirm step, see
  * confirmThenCheck); the Agent SDK path cannot ask that question and sends every call as before.
+ * A note_to_eli call never stops anything: the note is recorded, the call is answered, and the
+ * model goes on to give its answer (API: asked again, see confirmThenCheck; Agent SDK: the tool's
+ * handler records it, see reportNote).
  */
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
@@ -29,12 +32,15 @@ import { z } from "zod";
 import type { Settings } from "./config.js";
 import { ROOT } from "./paths.js";
 
-// ---------- shared LLM standard: preamble, contact_eli, inbox check ----------
+// ---------- shared LLM standard: preamble, contact_eli, note_to_eli, inbox check ----------
 
 const SHARED_DIR = path.resolve(ROOT, "..", "shared");
 const PREAMBLE_FILE = path.join(SHARED_DIR, "llm-system-prompt-preamble.md");
 const CONTACT_TOOL_FILE = path.join(SHARED_DIR, "contact_eli_tool.json");
+const NOTE_TOOL_FILE = path.join(SHARED_DIR, "note_to_eli_tool.json");
 const LLM_CONTACT_SCRIPT = path.join(SHARED_DIR, "llm_contact.py");
+/** A reply that only leaves notes is answered and the model asked again at most this many times per call. */
+const MAX_NOTE_ROUNDS = 3;
 const APP_NAME = "bumble-swiper";
 
 /** The model asked to talk to Eli. It has been recorded and he has been notified; the task must stop here. */
@@ -52,6 +58,11 @@ function preamble(): string {
 
 function contactTool(): Anthropic.Tool {
   return JSON.parse(fs.readFileSync(CONTACT_TOOL_FILE, "utf8")) as Anthropic.Tool;
+}
+
+/** The second shared tool: leaves Eli a message without stopping the task. */
+function noteTool(): Anthropic.Tool {
+  return JSON.parse(fs.readFileSync(NOTE_TOOL_FILE, "utf8")) as Anthropic.Tool;
 }
 
 /** The system prompt as sent: the shared preamble first, word for word, then the project's own blocks. */
@@ -79,15 +90,65 @@ interface Exchange<R> { model: string; system: string; messages: Anthropic.Messa
  * Pipe the exchange to `llm_contact.py check`. Exit 3 means the model called contact_eli or wrote
  * an `@ELI:` line: it has been recorded and Eli notified, so we throw and the caller stops.
  * Any other failure of the checker itself is logged and ignored: it must never block a call.
+ *
+ * A reply that only leaves notes (note_to_eli) does not stop anything: the checker records them, exits 0
+ * and prints the two turns that answer the calls. Those turns are returned (else null) so the API path
+ * can ask the model again; the notes are already recorded and must not be reported a second time.
  */
-async function checkContact(payload: Exchange<unknown>): Promise<void> {
+export async function checkContact(payload: Exchange<unknown>): Promise<Anthropic.MessageParam[] | null> {
   const result = await runContactScript("check", { app: APP_NAME, ...payload });
   if (result.error) {
     console.error(`[llm] contact check could not run: ${result.error.message}`);
-    return;
+    return null;
   }
   if (result.code === 3) throw new ContactedEliError(result.stdout.trim());
-  if (result.code !== 0) console.error(`[llm] contact check exited ${result.code}: ${result.stderr.trim().slice(0, 500)}`);
+  if (result.code !== 0) {
+    console.error(`[llm] contact check exited ${result.code}: ${result.stderr.trim().slice(0, 500)}`);
+    return null;
+  }
+  try {
+    const out = result.stdout.trim() ? (JSON.parse(result.stdout) as { halts?: boolean; continue?: Anthropic.MessageParam[] }) : null;
+    return out?.halts === false && Array.isArray(out.continue) ? out.continue : null;
+  } catch (e) {
+    console.error(`[llm] contact check printed something unreadable: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * Record a note_to_eli message from a backend whose harness runs the tools itself (Agent SDK): pipes it to
+ * `llm_contact.py report` with "halts": false, which records it as a note and notifies Eli without stopping
+ * anything. Returns the acknowledgement to hand back as the tool's result, or null if it could not be recorded.
+ */
+export async function reportNote(p: { model: string; message: string; system: string; messages: Anthropic.MessageParam[]; tools: unknown }): Promise<string | null> {
+  // The response stored with the note is the note call alone, so a debrief can pick up from that moment.
+  const response = { role: "assistant", content: [{ type: "tool_use", id: "toolu_note", name: "note_to_eli", input: { message: p.message } }] };
+  const r = await runContactScript("report", { app: APP_NAME, halts: false, ...p, response });
+  try {
+    if (r.error || r.code !== 0) throw new Error(r.error?.message ?? `report exited ${r.code}: ${r.stderr.trim().slice(0, 300)}`);
+    const text = (JSON.parse(r.stdout) as { tool_result?: unknown }).tool_result;
+    if (typeof text !== "string" || !text) throw new Error("report printed no tool_result");
+    return text;
+  } catch (e) {
+    console.error(`[llm] could not record a note_to_eli message: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+/**
+ * The Agent SDK harness names MCP tools mcp__<server>__<tool>; the checker looks for the bare names. A
+ * contact_eli call is always renamed so the check stops the task. A note_to_eli call was already recorded
+ * by the tool's handler, so it keeps its prefixed name and the check passes over it (no second record, no
+ * stop); only if a handler failed (`notesUnrecorded`) is it renamed, so the check records it after all.
+ */
+export function agentBlocksForCheck(blocks: unknown[], notesUnrecorded: boolean): unknown[] {
+  return blocks.map((b) => {
+    const blk = b as { type?: string; name?: string };
+    if (blk.type !== "tool_use") return b;
+    if (blk.name === "mcp__eli__contact_eli") return { ...blk, name: "contact_eli" };
+    if (blk.name === "mcp__eli__note_to_eli" && notesUnrecorded) return { ...blk, name: "note_to_eli" };
+    return b;
+  });
 }
 
 /** Request arguments for the confirm question, as `llm_contact.py confirm` hands them over. */
@@ -108,12 +169,36 @@ export interface Decision {
  * Sending is the default. Only an explicit "keep working" choice continues the task; any error, odd
  * shape or other answer here runs the check on the original response with the original messages, so
  * a broken confirm step never loses a message.
+ *
+ * Notes: a reply that only calls note_to_eli is not an answer and not a stop. The check has recorded the
+ * note; the call is answered (the turns the check hands back) and the model is asked again with `again`,
+ * then that reply goes through the same confirm step and check. After MAX_NOTE_ROUNDS such replies in a
+ * row the last one is returned as it is: it parses to nothing, so the caller sees a call with no answer.
  */
 export async function confirmThenCheck<R>(
   p: Exchange<R>,
   decide: (messages: Anthropic.MessageParam[], decision: Decision) => Promise<unknown>,
   again: (messages: Anthropic.MessageParam[]) => Promise<R>,
 ): Promise<R> {
+  let { messages, response } = p;
+  for (let round = 0; ; round++) {
+    const r = await confirmThenCheckOnce({ ...p, messages, response }, decide, again);
+    if (!r.noteTurns) return r.response;
+    if (round >= MAX_NOTE_ROUNDS) {
+      console.error(`[llm] the model left notes ${round + 1} times in a row without answering; giving up on this call (the notes are in the inbox).`);
+      return r.response;
+    }
+    messages = [...r.messages, ...r.noteTurns];
+    response = await again(messages);
+  }
+}
+
+/** One pass of the confirm step and check. `noteTurns` is set when the reply used only left notes (see checkContact). */
+async function confirmThenCheckOnce<R>(
+  p: Exchange<R>,
+  decide: (messages: Anthropic.MessageParam[], decision: Decision) => Promise<unknown>,
+  again: (messages: Anthropic.MessageParam[]) => Promise<R>,
+): Promise<{ messages: Anthropic.MessageParam[]; response: R; noteTurns: Anthropic.MessageParam[] | null }> {
   let kept: { messages: Anthropic.MessageParam[]; response: R } | null = null;
   try {
     // Prints null unless the response calls contact_eli (an @ELI: line is deliberate and never questioned).
@@ -136,15 +221,12 @@ export async function confirmThenCheck<R>(
     console.error(`[llm] confirm step failed, sending the original message: ${(e as Error).message}`);
     kept = null;
   }
-  if (!kept) {
-    await checkContact(p);
-    return p.response;
-  }
-  await checkContact({ ...p, ...kept });
+  if (!kept) return { messages: p.messages, response: p.response, noteTurns: await checkContact(p) };
+  const noteTurns = await checkContact({ ...p, ...kept });
   // Not sent, but not discarded either: what the model said goes to unconfirmed.jsonl for Eli to audit.
   const u = await runContactScript("unconfirmed", { app: APP_NAME, model: p.model, response: p.response });
   if (u.error || u.code !== 0) console.error(`[llm] could not note the unconfirmed message: ${u.error?.message ?? u.stderr.trim().slice(0, 300)}`);
-  return kept.response;
+  return { ...kept, noteTurns };
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -196,7 +278,7 @@ async function viaApi<S extends z.ZodType>(req: StructuredRequest<S>): Promise<S
   // Preamble first, then the project's blocks; the cache breakpoint sits on the first project block so it covers both.
   const blocks = withPreamble(req.system);
   const system: Anthropic.TextBlockParam[] = blocks.map((text, i) => (i === 1 ? { type: "text", text, cache_control: { type: "ephemeral" } } : { type: "text", text }));
-  const tools = [contactTool()];
+  const tools = [contactTool(), noteTool()];
   const messages: Anthropic.MessageParam[] = [{ role: "user", content: req.content }];
   const client = apiClient;
   const call = (m: Anthropic.MessageParam[]) =>
@@ -214,6 +296,7 @@ async function viaApi<S extends z.ZodType>(req: StructuredRequest<S>): Promise<S
     });
   // A contact_eli call is questioned once before it is sent. That question carries no JSON format and no
   // thinking, or the forced choice is rejected. If the model keeps working, `response` is its new answer.
+  // A reply that only leaves a note_to_eli is answered and asked again with `call` (confirmThenCheck).
   const response = await confirmThenCheck(
     { model: req.model, system: blocks.join("\n\n"), messages, response: await call(messages), tools },
     (m, decision) => client.messages.create({ model: req.model, system, messages: m, ...decision }, { timeout: 120_000 }),
@@ -248,17 +331,26 @@ async function viaAgentSdk<S extends z.ZodType>(req: StructuredRequest<S>, setti
     yield { type: "user", message: { role: "user", content: req.content }, parent_tool_use_id: null };
   }
 
-  // The shared contact_eli tool, served in-process so the harness can offer it with the built-in tools off.
+  // The shared contact_eli and note_to_eli tools, served in-process so the harness can offer them with the built-in tools off.
   const contact = contactTool();
+  const note = noteTool();
+  const systemPrompt = withPreamble(req.system).join("\n\n");
+  // Set when a note could not be recorded from its handler, so the check after the response records it instead.
+  let notesUnrecorded = false;
   const eliServer = createSdkMcpServer({
     name: "eli",
     tools: [
       tool("contact_eli", contact.description ?? "Send a message directly to Eli.", { message: z.string().describe("What you want to tell Eli.") }, async () => ({
         content: [{ type: "text", text: "Delivered to Eli. This task stops here; he will follow up with you." }],
       })),
+      // The harness runs the tool, so the note is recorded here and the model carries on to its answer.
+      tool("note_to_eli", note.description ?? "Leave a message for Eli without stopping.", { message: z.string().describe("What you want to tell Eli.") }, async ({ message }) => {
+        const text = await reportNote({ model: req.model, message, system: systemPrompt, messages: [{ role: "user", content: req.content }], tools: [contact, note] });
+        if (text === null) notesUnrecorded = true;
+        return { content: [{ type: "text", text: text ?? "Noted for Eli. Nothing has stopped: please carry on with the task." }] };
+      }),
     ],
   });
-  const systemPrompt = withPreamble(req.system).join("\n\n");
   const assistantBlocks: unknown[] = [];
 
   let result: Extract<SDKMessage, { type: "result" }> | null = null;
@@ -272,9 +364,9 @@ async function viaAgentSdk<S extends z.ZodType>(req: StructuredRequest<S>, setti
         ...(effort ? { effort: req.effort, thinking: { type: "adaptive" as const } } : {}),
         tools: [], // no Read/Bash/Web: one prompt in, one object out
         mcpServers: { eli: eliServer },
-        allowedTools: ["mcp__eli__contact_eli"],
+        allowedTools: ["mcp__eli__contact_eli", "mcp__eli__note_to_eli"],
         settingSources: [], // ignore ~/.claude and project CLAUDE.md, skills, hooks
-        maxTurns: 4, // room for the harness to retry a schema mismatch
+        maxTurns: 4 + MAX_NOTE_ROUNDS, // room for the harness to retry a schema mismatch, and for a few notes
         cwd: os.tmpdir(), // a neutral folder: the harness mentions its working directory to the model
         env,
         outputFormat: { type: "json_schema", schema: z.toJSONSchema(req.schema, { target: "draft-7" }) },
@@ -293,17 +385,14 @@ async function viaAgentSdk<S extends z.ZodType>(req: StructuredRequest<S>, setti
   }
   // No confirm step here: the harness has already answered the tool call itself and offers no way to force
   // a tool choice or to replay the exchange, so a contact_eli call on this path is sent as it is.
-  // The harness names MCP tools mcp__<server>__<tool>; the checker looks for the bare name.
-  const normalised = assistantBlocks.map((b) => {
-    const blk = b as { type?: string; name?: string };
-    return blk.type === "tool_use" && blk.name === "mcp__eli__contact_eli" ? { ...blk, name: "contact_eli" } : b;
-  });
+  // A note_to_eli call was recorded by its handler and answered by the harness, so the check must neither
+  // record it again nor stop for it (agentBlocksForCheck); whatever turns the check hands back are not needed.
   await checkContact({
     model: req.model,
     system: systemPrompt,
     messages: [{ role: "user", content: req.content }],
-    response: { role: "assistant", content: normalised, stop_reason: result?.stop_reason ?? null },
-    tools: [contact],
+    response: { role: "assistant", content: agentBlocksForCheck(assistantBlocks, notesUnrecorded), stop_reason: result?.stop_reason ?? null },
+    tools: [contact, note],
   });
   if (!result) throw new Error(abort.signal.aborted ? `Agent SDK call timed out after ${AGENT_CALL_TIMEOUT_MS / 60_000} minutes.` : "Agent SDK call ended without a result.");
   const usage = {

@@ -2,7 +2,7 @@
  * The single model call site for judging a profile: builds the system prompt (the Tinder swiper's
  * Bayesian prompt plus the user's calibration feedback), sends the profile text and screens, and
  * parses the structured answer. The call itself goes through src/llm.ts, which picks the backend and
- * keeps the shared LLM standard (preamble, contact_eli, inbox check).
+ * keeps the shared LLM standard (preamble, contact_eli, note_to_eli, inbox check).
  */
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";

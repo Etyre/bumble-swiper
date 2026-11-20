@@ -5,8 +5,8 @@
  * contact_eli tool are wired in, and the structured output parses.
  *
  *   npm test                               # one fake profile, current settings (one model call)
- *   npm test -- --dry-run                  # free: checks the preamble, the tool and the inbox hook, and
- *                                          # runs the confirm step on stubbed replies (temp inbox)
+ *   npm test -- --dry-run                  # free: checks the preamble, the tools and the inbox hook, and runs
+ *                                          # the confirm step and note_to_eli on stubbed replies (temp inbox)
  *   npm test -- --model claude-haiku-5-5 --backend api
  *   npm test -- --contact                  # asks the model to call contact_eli: a test message
  *                                          # lands in Eli's LLM inbox (llm-inbox list)
@@ -21,7 +21,7 @@ import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { classifyProfile, decide, buildSystem } from "./classifier.js";
 import { loadSettings, type Settings } from "./config.js";
-import { ContactedEliError, backendLabel, confirmThenCheck, structuredCall } from "./llm.js";
+import { ContactedEliError, agentBlocksForCheck, backendLabel, checkContact, confirmThenCheck, reportNote, structuredCall } from "./llm.js";
 import { ROOT } from "./paths.js";
 
 const FAKE_PROFILE = `Maya, 31
@@ -51,13 +51,15 @@ function dryRun(settings: Settings): void {
   const preamble = fs.readFileSync(path.join(shared, "llm-system-prompt-preamble.md"), "utf8").trim();
   const tool = JSON.parse(fs.readFileSync(path.join(shared, "contact_eli_tool.json"), "utf8")) as { name: string };
   if (tool.name !== "contact_eli") throw new Error(`contact_eli_tool.json defines "${tool.name}", not contact_eli`);
+  const note = JSON.parse(fs.readFileSync(path.join(shared, "note_to_eli_tool.json"), "utf8")) as { name: string };
+  if (note.name !== "note_to_eli") throw new Error(`note_to_eli_tool.json defines "${note.name}", not note_to_eli`);
   const system = buildSystem(settings);
   if (!system[0].includes("CRITERION:")) throw new Error("the classifier prompt is missing its criterion");
-  console.log(`OK: preamble (${preamble.length} chars) read from shared/, contact_eli tool loaded, classifier prompt built (${system.length} block${system.length === 1 ? "" : "s"}).`);
+  console.log(`OK: preamble (${preamble.length} chars) read from shared/, contact_eli and note_to_eli tools loaded, classifier prompt built (${system.length} block${system.length === 1 ? "" : "s"}).`);
   // The inbox hook: a response with no contact must exit 0; one with the tool call must exit 3.
   const run = (response: unknown) =>
     spawnSync("python3", ["-I", path.join(shared, "llm_contact.py"), "check"], {
-      input: JSON.stringify({ app: "bumble-swiper", model: settings.model, system: `${preamble}\n\n${system.join("\n\n")}`, messages: [{ role: "user", content: "wiring test" }], response, tools: [tool] }),
+      input: JSON.stringify({ app: "bumble-swiper", model: settings.model, system: `${preamble}\n\n${system.join("\n\n")}`, messages: [{ role: "user", content: "wiring test" }], response, tools: [tool, note] }),
       encoding: "utf8",
     });
   const quiet = run({ role: "assistant", content: [{ type: "text", text: "{\"ok\": true}" }] });
@@ -67,20 +69,21 @@ function dryRun(settings: Settings): void {
 }
 
 /**
- * The confirm step on stubbed model replies: no API call. LLM_INBOX_DIR points llm_contact.py at a
+ * The confirm step and the note tool on stubbed model replies: no API call. LLM_INBOX_DIR points llm_contact.py at a
  * throwaway inbox for the duration, so records land there and Eli is not notified.
  */
 async function confirmStepOffline(): Promise<void> {
   const inbox = fs.mkdtempSync(path.join(os.tmpdir(), "bumble-swiper-inbox-"));
   const before = process.env.LLM_INBOX_DIR;
   process.env.LLM_INBOX_DIR = inbox;
-  const lines = (f: string): { message?: string }[] => {
+  const lines = (f: string): { message?: string; via?: string; halts?: boolean }[] => {
     const file = path.join(inbox, f);
     return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
   };
   const fail = (m: string): never => { throw new Error(`confirm step: ${m}`); };
   try {
-    const tools = [JSON.parse(fs.readFileSync(path.join(path.resolve(ROOT, "..", "shared"), "contact_eli_tool.json"), "utf8"))];
+    const tools = ["contact_eli_tool.json", "note_to_eli_tool.json"].map((f) => JSON.parse(fs.readFileSync(path.join(path.resolve(ROOT, "..", "shared"), f), "utf8")));
+    if (tools[1].name !== "note_to_eli") fail(`note_to_eli_tool.json defines "${tools[1].name}", not note_to_eli`);
     const messages = [{ role: "user" as const, content: "PROFILE TEXT: stub" }];
     const plain = { role: "assistant", content: [{ type: "text", text: '{"probability":0.1}' }] };
     const called = { role: "assistant", content: [{ type: "tool_use", id: "toolu_test1", name: "contact_eli", input: { message: "This profile has no bio." } }] };
@@ -94,7 +97,7 @@ async function confirmStepOffline(): Promise<void> {
         async (m, d) => {
           decides++;
           if (m.length !== 3 || m[2].role !== "user") fail("the question call did not get messages + ask");
-          if (d.tool_choice.type !== "tool" || d.tool_choice.name !== "contact_eli_decision" || d.tools.length !== 2 || !d.max_tokens) fail("the question call did not get the forced decision tool");
+          if (d.tool_choice.type !== "tool" || d.tool_choice.name !== "contact_eli_decision" || d.tools.length !== 3 || !d.max_tokens) fail("the question call did not get the forced decision tool");
           return decide();
         },
         async (m) => {
@@ -124,6 +127,52 @@ async function confirmStepOffline(): Promise<void> {
     if ((await run(called, () => fail("asked a model the confirm step is not validated for"), "claude-opus-5")) !== "sent" || decides || lines("messages.jsonl").length !== 5) fail("a non-validated model's contact_eli call was not sent straight away");
     console.log("OK: confirm step, non-validated model (claude-opus-5): sent without a question.");
     console.log(`OK: confirm step, @ELI: line: sent without a question (test inbox ${inbox}).`);
+
+    // note_to_eli: the note is recorded once, the call is answered, the model is asked again, nothing stops.
+    const sent = (e: unknown) => (e instanceof ContactedEliError ? "sent" : Promise.reject(e));
+    const noteCall = (id: string, message: string) => ({ role: "assistant", content: [{ type: "tool_use", id, name: "note_to_eli", input: { message } }] });
+    const noted = noteCall("toolu_test3", "The bio field looks cut off.");
+    let asked: unknown[][] = [];
+    /** `replies` are the model's answers to the follow-up calls, in order. */
+    const noteRun = (first: unknown, replies: unknown[]) =>
+      confirmThenCheck<unknown>(
+        { model: "claude-opus-5", system: "stub system", messages, response: first, tools },
+        async () => fail("asked the confirm question about a note"),
+        async (m) => {
+          asked.push(m);
+          return replies.shift() ?? fail("more follow-up calls than expected");
+        },
+      ).catch(sent);
+    const inboxNow = () => lines("messages.jsonl");
+
+    let n = inboxNow().length;
+    if ((await noteRun(noted, [plain])) !== plain || asked.length !== 1) fail("a note-only reply did not lead to one more call and its answer");
+    const turns = asked[0] as { role: string; content: { type: string; tool_use_id?: string; name?: string }[] }[];
+    if (turns.length !== 3 || turns[1].role !== "assistant" || turns[1].content[0].name !== "note_to_eli" || turns[2].role !== "user" || turns[2].content[0].type !== "tool_result" || turns[2].content[0].tool_use_id !== "toolu_test3") fail("the follow-up call did not get messages + the note call + its tool_result");
+    const rec = inboxNow()[n];
+    if (inboxNow().length !== n + 1 || rec.via !== "note" || rec.halts !== false || rec.message !== "The bio field looks cut off.") fail("the note was not recorded exactly once as a note");
+    console.log("OK: note_to_eli, note-only reply: one note recorded, asked again, normal answer used, no stop.");
+
+    n = inboxNow().length; asked = [];
+    if ((await noteRun(noted, [called])) !== "sent" || asked.length !== 1 || inboxNow().length !== n + 2 || inboxNow()[n + 1].via !== "tool") fail("contact_eli after a note did not stop");
+    console.log("OK: note_to_eli, then contact_eli on the next reply: note recorded, contact recorded, stopped.");
+
+    n = inboxNow().length; asked = [];
+    const last = noteCall("toolu_test7", "note 4");
+    if ((await noteRun(noted, [noteCall("toolu_test5", "note 2"), noteCall("toolu_test6", "note 3"), last])) !== last || asked.length !== 3 || inboxNow().length !== n + 4) fail("repeated notes were not capped at 3 follow-up calls");
+    console.log("OK: note_to_eli, four note-only replies in a row: 3 follow-up calls, 4 notes recorded, no stop, no answer.");
+
+    // Agent SDK path: the tool's handler records the note; the check after the response must not record it again or stop.
+    n = inboxNow().length;
+    const ack = await reportNote({ model: "claude-opus-5", message: "Screens 2 and 3 are identical.", system: "stub system", messages, tools });
+    if (!ack || inboxNow().length !== n + 1 || inboxNow()[n].via !== "note" || inboxNow()[n].halts !== false || inboxNow()[n].message !== "Screens 2 and 3 are identical.") fail("the Agent SDK note handler did not record the note");
+    const sdkNote = { type: "tool_use", id: "toolu_test8", name: "mcp__eli__note_to_eli", input: { message: "Screens 2 and 3 are identical." } };
+    const sdkCheck = (blocks: unknown[], unrecorded = false) =>
+      checkContact({ model: "claude-opus-5", system: "stub system", messages, response: { role: "assistant", content: agentBlocksForCheck(blocks, unrecorded) }, tools }).catch(sent);
+    if ((await sdkCheck([sdkNote, { type: "text", text: '{"probability":0.1}' }])) !== null || inboxNow().length !== n + 1) fail("the check after an Agent SDK reply recorded the note again or stopped");
+    if ((await sdkCheck([sdkNote], true)) === "sent" || inboxNow().length !== n + 2) fail("a note its handler could not record was not recorded by the check");
+    if ((await sdkCheck([sdkNote, { type: "tool_use", id: "toolu_test9", name: "mcp__eli__contact_eli", input: { message: "I would like to stop." } }])) !== "sent" || inboxNow().length !== n + 3) fail("contact_eli on the Agent SDK path did not stop");
+    console.log(`OK: note_to_eli, Agent SDK path: handler records once ("${ack}"), check does not repeat it, contact_eli still stops.`);
   } finally {
     if (before === undefined) delete process.env.LLM_INBOX_DIR;
     else process.env.LLM_INBOX_DIR = before;
